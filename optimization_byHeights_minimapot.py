@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
@@ -9,7 +8,6 @@ from tqdm import tqdm
 from deap import base, creator, tools, algorithms
 import random
 import os
-
 
 # --- constant definition ---
 um = 1e-6
@@ -29,6 +27,7 @@ b = squaresize_b / 2
 def create_rectangle(x1, z1, x2, z2):
     return np.array([[z1, x1], [z2, x1], [z2, x2], [z1, x2]])
 
+# <中略: generate_rf_electrodes, pot関数群は変わらず>
 def generate_rf_electrodes(pq_starts, n_add_each, pqb_starts, nb_add_each):
     base_rf = [
         create_rectangle(100, -5500, 400, -1000),
@@ -86,8 +85,8 @@ def generate_rf_electrodes(pq_starts, n_add_each, pqb_starts, nb_add_each):
     return base_rf, added_rf, added_rf_base
 
 # ===================================================
-# :two: potential funtction
-#  ===================================================
+# 2️⃣ ポテンシャル関数
+# ===================================================
 def extract_bounds(poly_list):
     return [[min([p[1] for p in poly]), min([p[0] for p in poly]),
              max([p[1] for p in poly]), max([p[0] for p in poly])]
@@ -122,14 +121,14 @@ def pseud_pot(x, y, z, rf_ele_base, rf_ele_added, rf_ele_added_base):
     return pseud_A * grad2
 
 # ===================================================
-# :three: GA definition of symmetory electrode
+# :three: GA definition of symmetory electrode (NSGA-II)
 # ===================================================
 pq_starts = [(95 - 10 * i, 95 - 10 * i) for i in range(8)]
 pqb_starts = [(975, 125 + 50 * i) for i in range(6)]
 IND_SIZE = len(pq_starts) + len(pqb_starts)
 
-creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-creator.create("Individual", list, fitness=creator.FitnessMin)
+creator.create("FitnessMulti", base.Fitness, weights=(-1.0, -1.0))
+creator.create("Individual", list, fitness=creator.FitnessMulti)
 
 toolbox = base.Toolbox()
 
@@ -141,6 +140,7 @@ def generate_monotonic_individual():
 toolbox.register("individual", generate_monotonic_individual)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
+# --- 多目的評価関数 ---
 def evaluate(ind):
     n_add_small = ind[:len(pq_starts)]
     n_add_large = ind[len(pq_starts):]
@@ -152,10 +152,17 @@ def evaluate(ind):
     xpos = np.linspace(0, 500, 20) * um
     ypos = np.linspace(100, 300, 20) * um
     trap_heights = []
+    trap_min_pots = []
+
     for x in xpos:
         pots = [pseud_pot(x, y, 0, rf_ele_base, rf_ele_added, rf_ele_added_base) for y in ypos]
-        trap_heights.append(ypos[np.argmin(pots)] / um)
-    return np.mean([abs(y - 200) for y in trap_heights]),
+        min_index = np.argmin(pots)
+        trap_heights.append(ypos[min_index] / um)
+        trap_min_pots.append(pots[min_index])
+
+    height_error = np.mean([abs(y - 200) for y in trap_heights])
+    pot_std = np.std(trap_min_pots)
+    return height_error, pot_std
 
 def custom_mate(ind1, ind2):
     tools.cxTwoPoint(ind1, ind2)
@@ -174,39 +181,38 @@ def custom_mutate(ind):
 toolbox.register("evaluate", evaluate)
 toolbox.register("mate", custom_mate)
 toolbox.register("mutate", custom_mutate)
-toolbox.register("select", tools.selTournament, tournsize=3)
-# give_intial_individualds
+toolbox.register("select", tools.selNSGA2)
+
 initial_ind = [44, 18, 12, 9, 6, 6, 2, 0, 18, 17, 16, 14, 5, 3]
-population = [creator.Individual(initial_ind)] + toolbox.population(n=20)  # initial_indvidual1 + random_individual
+population = [creator.Individual(initial_ind)] + toolbox.population(n=1)
 NGEN = 1
+
+for ind in population:
+    ind.fitness.values = toolbox.evaluate(ind)
 
 for gen in tqdm(range(NGEN), desc="GA Progress"):
     offspring = algorithms.varAnd(population, toolbox, cxpb=0.5, mutpb=0.3)
-    fits = list(map(toolbox.evaluate, offspring))
-    for fit, ind in zip(fits, offspring):
-        ind.fitness.values = fit
-    population = toolbox.select(offspring, k=len(population))
-    best = tools.selBest(population, 1)[0]
-    print(f"Generation {gen+1}: Best fitness = {best.fitness.values[0]:.4f}")
+    for ind in offspring:
+        ind.fitness.values = toolbox.evaluate(ind)
+    population = toolbox.select(population + offspring, k=len(population))
 
-best_ind = tools.selBest(population, 1)[0]
-print("Best individual:", best_ind)
-print("Fitness:", best_ind.fitness.values[0])
-#50-40-100-10(y精度細かく)-20-200
+best = tools.sortNondominated(population, k=1, first_front_only=True)[0][0]
+print("Best individual:", best)
+print("Fitness:", best.fitness.values)
 
 # Recreate_optimized_electrode
-n_add_small = best_ind[:len(pq_starts)]
-n_add_large = best_ind[len(pqb_starts):]
+n_add_small = best[:len(pq_starts)]
+n_add_large = best[len(pq_starts):]
 base_rf_final, added_rf_final, added_rf_base_final = generate_rf_electrodes(pq_starts, n_add_small, pqb_starts, n_add_large)
 
-#---保存先---
+# --- 保存先 ---
 folder_name = f"{initial_ind}_gen{NGEN}"
-new_dir_path = os.path.join("/Users/miyamotomanari/Documents/PythonScripts/electrode_optimization/opt_add_rf/opt_file", folder_name)
-os.makedirs(new_dir_path, exist_ok = True)
+new_dir_path = os.path.join("/Users/miyamotomanari/Documents/PythonScripts/electrode_optimization/opt_add_rf/Multi_opt_file", folder_name)
+os.makedirs(new_dir_path, exist_ok=True)
 
-file_name = f"_gen{NGEN}_" + "_".join(map(str, best_ind)) + f"_f{best_ind.fitness.values[0]:.4f}"
+file_name = f"_gen{NGEN}_" + "_".join(map(str, best)) + f"_f{best.fitness.values[0]:.4f}_{best.fitness.values[1]:.4f}"
 
-
+# 以下描画とポテンシャル計算のコード（元のまま続行）
 # ===================================================
 # :four: Draw_electrode
 # ===================================================
@@ -254,13 +260,17 @@ rf_ele_added_base = np.array(extract_bounds(added_rf_base_final)) * um
 
 Z = np.zeros_like(X)
 trap_ys = []
+trap_minpots = []
 
 for i in tqdm(range(len(x_range)), desc="Calculating potential map"):
     for j in range(len(y_range)):
         Z[j, i] = pseud_pot(x_range[i], y_range[j], 0, rf_ele_base, rf_ele_added, rf_ele_added_base)
-    trap_y = y_range[np.argmin(Z[:, i])]
+    min_index = np.argmin(Z[:, i])
+    trap_y = y_range[min_index]
     trap_ys.append(trap_y / um)
+    trap_minpots.append(Z[min_index, i])
 
+# ポテンシャルマップ
 plt.figure(figsize=(10, 6))
 plt.contourf(x_range / um, y_range / um, Z, levels=50, cmap='viridis')
 plt.colorbar(label="Pseudopotential [arb. unit]")
@@ -272,19 +282,26 @@ plt.legend()
 plt.tight_layout()
 file_path = os.path.join(new_dir_path, 'potential_map' + file_name + '.png')
 plt.savefig(file_path, dpi=300, transparent=True)
-file_path = os.path.join(new_dir_path, 'potential_mapt' + file_name + '.svg')
+file_path = os.path.join(new_dir_path, 'potential_map' + file_name + '.svg')
 plt.savefig(file_path, dpi=300, transparent=True)
 
-plt.figure(figsize=(8, 4))
-plt.plot(x_range / um, trap_ys, marker='o', markersize=2)
-plt.axhline(200, color='gray', linestyle='--', label='Target height 200 µm')
-plt.xlabel("X [µm]")
-plt.ylabel("Trap Height Y [µm]")
-plt.title("Ion Trap Height Along X-axis")
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-file_path = os.path.join(new_dir_path, 'Height_curve' + file_name + '.png')
+# 高さ変化とポテンシャル変化のプロット
+fig, ax1 = plt.subplots(figsize=(10, 4))
+ax1.plot(x_range / um, trap_ys, 'r-o', markersize=2, label="Trap Height")
+ax1.set_xlabel("X [µm]")
+ax1.set_ylabel("Trap Height Y [µm]", color='r')
+ax1.axhline(200, color='gray', linestyle='--', label='Target Height')
+ax1.tick_params(axis='y', labelcolor='r')
+
+ax2 = ax1.twinx()
+ax2.plot(x_range / um, trap_minpots, 'b--', label="Min Pseudopotential")
+ax2.set_ylabel("Pseudopotential Min [arb. unit]", color='b')
+ax2.tick_params(axis='y', labelcolor='b')
+
+fig.suptitle("Trap Height and Min Pseudopotential vs X")
+fig.tight_layout()
+file_path = os.path.join(new_dir_path, 'Height_MinPot_curve' + file_name + '.png')
 plt.savefig(file_path, dpi=300, transparent=True)
-file_path = os.path.join(new_dir_path, 'Height_curve' + file_name + '.svg')
+file_path = os.path.join(new_dir_path, 'Height_MinPot_curve' + file_name + '.svg')
 plt.savefig(file_path, dpi=300, transparent=True)
+
